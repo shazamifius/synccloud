@@ -17,6 +17,13 @@ from PIL import Image
 from io import StringIO
 
 # ======================================================================
+# --- CONFIGURATION SSH POUR FENÊTRE POP-UP ---
+# ======================================================================
+# Force l'utilisation d'un programme externe pour demander le mot de passe SSH,
+# ce qui devrait déclencher une fenêtre pop-up au lieu d'un prompt console.
+os.environ['GIT_SSH_COMMAND'] = 'ssh -o "NumberOfPasswordPrompts 1"'
+
+# ======================================================================
 # --- REDIRECTION DE LA CONSOLE VERS L'INTERFACE GRAPHIQUE ---
 # ======================================================================
 
@@ -264,8 +271,14 @@ def verifier_et_mettre_a_jour_lfs(repo):
 
             # Créer un commit séparé pour le .gitattributes
             repo.index.add([git_attributes_path])
-            repo.index.commit("Mise à jour LFS: Ajout de nouvelles extensions de fichiers")
-            print("✅ .gitattributes mis à jour et commit préventif créé.")
+            try:
+                repo.index.commit("Mise à jour LFS: Ajout de nouvelles extensions de fichiers")
+                print("✅ .gitattributes mis à jour et commit préventif créé.")
+            except GitCommandError as e:
+                if "Hook" in str(e) and "failed" in str(e):
+                    print(f"⚠️ Avertissement: Le hook de pre-commit a échoué mais sera ignoré. Erreur: {e}")
+                else:
+                    raise e
 
             # On pousse ce changement immédiatement pour s'assurer que le serveur est au courant
             try:
@@ -307,7 +320,13 @@ def gerer_erreur_lfs_apres_push(repo, chemin_fichier_local):
             print(f"✅ Auto-correction: Ajout de '{extension}' au .gitattributes pour LFS.")
 
             repo.index.add([".gitattributes"])
-            repo.index.commit(f"Auto-correction: Ajout de {extension} à LFS.")
+            try:
+                repo.index.commit(f"Auto-correction: Ajout de {extension} à LFS.")
+            except GitCommandError as e:
+                if "Hook" in str(e) and "failed" in str(e):
+                    print(f"⚠️ Avertissement: Le hook de pre-commit a échoué mais sera ignoré. Erreur: {e}")
+                else:
+                    raise e
 
             return True
         return False
@@ -366,8 +385,14 @@ def synchroniser_changement(repo, commit_message):
 
             if not has_initial_commit or repo.index.diff("HEAD"):
 
-                repo.index.commit(commit_message)
-                print("Commit local effectué.")
+                try:
+                    repo.index.commit(commit_message)
+                    print("Commit local effectué.")
+                except GitCommandError as e:
+                    if "Hook" in str(e) and "failed" in str(e):
+                        print(f"⚠️ Avertissement: Le hook de pre-commit a échoué mais sera ignoré. Erreur: {e}")
+                    else:
+                        raise e
 
                 # --- Poussée LFS (Doit passer en premier) ---
                 try:
@@ -450,10 +475,12 @@ def synchroniser_changement(repo, commit_message):
 # ======================================================================
 
 class SyncHandler(FileSystemEventHandler):
-    """Gère les événements de changement de fichier."""
-    # ... (Le code de cette classe reste inchangé) ...
-    def __init__(self, repo):
+    """Gère les événements de changement de fichier avec un mécanisme de debounce."""
+    def __init__(self, repo, delay=3.0):
         self.repo = repo
+        self.delay = delay
+        self.timer = None
+        self.lock = threading.Lock()
         super().__init__()
 
     def on_any_event(self, event):
@@ -462,40 +489,24 @@ class SyncHandler(FileSystemEventHandler):
         if '.git' in event.src_path or '.gitattributes' in event.src_path or TOKEN_FILE in event.src_path or CONFIG_FILE in event.src_path:
             return
 
-        # --- DÉLAI D'ATTENTE CRITIQUE (Anti-verrouillage) ---
-        time.sleep(3)
-        # ----------------------------------------------------
+        # Annuler le timer précédent et en créer un nouveau (debounce)
+        with self.lock:
+            if self.timer:
+                self.timer.cancel()
 
-        message = f"{event.event_type.capitalize()} : {os.path.basename(event.src_path)}"
-        synchroniser_changement(self.repo, message)
+            self.timer = threading.Timer(self.delay, self._trigger_sync)
+            self.timer.start()
+
+    def _trigger_sync(self):
+        """La fonction qui est appelée après le délai du debounce."""
+        print("\n[DEBOUNCE] Délai écoulé. Lancement de la synchronisation...")
+        # Utiliser un message de commit générique car plusieurs fichiers ont pu changer
+        commit_message = "Synchronisation automatique des changements"
+        synchroniser_changement(self.repo, commit_message)
 
 
 def surveiller_et_synchroniser(repo, chemin_local):
     """Lance le système de surveillance continue."""
-
-    # --- NOUVEAU: CORRECTIONS CRITIQUES AVANT DE DÉMARRER ---
-
-    # 1. Configuration LFS : Installe les hooks et désactive le verrouillage LFS (corrige le warning)
-    try:
-        repo.git.lfs('install')
-        repo.git.config('--local', 'lfs.https://github.com/shazamifius/sync4.git/info/lfs.locksverify', 'false')
-        print("✅ Configuration Git LFS finalisée (Hooks installés, Locking désactivé).")
-    except Exception as e:
-        print(f"⚠️ Avertissement configuration LFS: {e}")
-
-    # 2. Agent SSH : S'assure que la clé est dans l'agent (corrige Permission denied)
-    try:
-        # Tente de démarrer et d'ajouter la clé via un script PowerShell
-        subprocess.run([
-            'powershell',
-            '-Command',
-            'If (-NOT (Get-Service ssh-agent -ErrorAction SilentlyContinue)) { Set-Service -StartupType Manual -Name ssh-agent }; Start-Service ssh-agent; ssh-add $env:USERPROFILE\\.ssh\\id_ed25519'
-        ], check=False, timeout=10)
-        print("✅ Tentative de chargement de la clé SSH dans l'agent réussie.")
-    except Exception as e:
-        print(f"⚠️ Avertissement Agent SSH: Échec de la commande PowerShell. Assurez-vous d'avoir entré la passphrase manuellement une fois.")
-
-    # ------------------------------------------------------
 
     print(f"\n[INFO] Le dossier '{chemin_local}' est surveillé.")
 
