@@ -17,13 +17,6 @@ from PIL import Image
 from io import StringIO
 
 # ======================================================================
-# --- CONFIGURATION SSH POUR FENÊTRE POP-UP ---
-# ======================================================================
-# Force l'utilisation d'un programme externe pour demander le mot de passe SSH,
-# ce qui devrait déclencher une fenêtre pop-up au lieu d'un prompt console.
-os.environ['GIT_SSH_COMMAND'] = 'ssh -o "NumberOfPasswordPrompts 1"'
-
-# ======================================================================
 # --- REDIRECTION DE LA CONSOLE VERS L'INTERFACE GRAPHIQUE ---
 # ======================================================================
 
@@ -370,6 +363,8 @@ def synchroniser_changement(repo, commit_message):
                         print(f"❌ Échec du reset --hard après conflit : {reset_e}")
                         # En cas d'échec du reset, il vaut mieux s'arrêter pour éviter la corruption
                         return
+                elif "could not read from remote repository" in error_output:
+                    print(f"❌ Erreur de Pull: Impossible de lire le dépôt distant. Vérifiez la connexion et la clé SSH.")
                 elif "fatal: couldn't find remote ref main" not in error_output:
                     print(f"⚠️ Avertissement lors du pull (non-conflit) : {e.stderr.strip()}")
 
@@ -507,6 +502,28 @@ class SyncHandler(FileSystemEventHandler):
 
 def surveiller_et_synchroniser(repo, chemin_local):
     """Lance le système de surveillance continue."""
+
+    # --- CORRECTIONS CRITIQUES AVANT DE DÉMARRER ---
+
+    # 1. Configuration LFS : Installe les hooks et désactive le verrouillage LFS
+    try:
+        repo.git.lfs('install')
+        repo.git.config('--local', f'lfs.{repo.remotes.origin.url}.info/lfs.locksverify', 'false')
+        print("✅ Configuration Git LFS finalisée (Hooks installés, Locking désactivé).")
+    except Exception as e:
+        print(f"⚠️ Avertissement configuration LFS: {e}")
+
+    # 2. Agent SSH : S'assure que la clé est dans l'agent
+    try:
+        # Tente de démarrer et d'ajouter la clé via un script PowerShell
+        subprocess.run([
+            'powershell',
+            '-Command',
+            'If (-NOT (Get-Service ssh-agent -ErrorAction SilentlyContinue)) { Set-Service -StartupType Manual -Name ssh-agent }; Start-Service ssh-agent; ssh-add $env:USERPROFILE\\.ssh\\id_ed25519'
+        ], check=False, timeout=10)
+        print("✅ Tentative de chargement de la clé SSH dans l'agent réussie.")
+    except Exception as e:
+        print(f"⚠️ Avertissement Agent SSH: Échec de la commande PowerShell. Assurez-vous d'avoir entré la passphrase manuellement une fois.")
 
     print(f"\n[INFO] Le dossier '{chemin_local}' est surveillé.")
 
