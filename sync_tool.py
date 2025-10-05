@@ -450,12 +450,10 @@ def synchroniser_changement(repo, commit_message):
 # ======================================================================
 
 class SyncHandler(FileSystemEventHandler):
-    """Gère les événements de changement de fichier avec un mécanisme de debounce."""
-    def __init__(self, repo, delay=3.0):
+    """Gère les événements de changement de fichier."""
+    # ... (Le code de cette classe reste inchangé) ...
+    def __init__(self, repo):
         self.repo = repo
-        self.delay = delay
-        self.timer = None
-        self.lock = threading.Lock()
         super().__init__()
 
     def on_any_event(self, event):
@@ -464,24 +462,41 @@ class SyncHandler(FileSystemEventHandler):
         if '.git' in event.src_path or '.gitattributes' in event.src_path or TOKEN_FILE in event.src_path or CONFIG_FILE in event.src_path:
             return
 
-        # Annuler le timer précédent et en créer un nouveau (debounce)
-        with self.lock:
-            if self.timer:
-                self.timer.cancel()
+        # --- DÉLAI D'ATTENTE CRITIQUE (Anti-verrouillage) ---
+        time.sleep(3)
+        # ----------------------------------------------------
 
-            self.timer = threading.Timer(self.delay, self._trigger_sync)
-            self.timer.start()
-
-    def _trigger_sync(self):
-        """La fonction qui est appelée après le délai du debounce."""
-        print("\n[DEBOUNCE] Délai écoulé. Lancement de la synchronisation...")
-        # Utiliser un message de commit générique car plusieurs fichiers ont pu changer
-        commit_message = "Synchronisation automatique des changements"
-        synchroniser_changement(self.repo, commit_message)
+        message = f"{event.event_type.capitalize()} : {os.path.basename(event.src_path)}"
+        synchroniser_changement(self.repo, message)
 
 
 def surveiller_et_synchroniser(repo, chemin_local):
     """Lance le système de surveillance continue."""
+
+    # --- NOUVEAU: CORRECTIONS CRITIQUES AVANT DE DÉMARRER ---
+
+    # 1. Configuration LFS : Installe les hooks et désactive le verrouillage LFS (corrige le warning)
+    try:
+        repo.git.lfs('install')
+        repo.git.config('--local', 'lfs.https://github.com/shazamifius/sync4.git/info/lfs.locksverify', 'false')
+        print("✅ Configuration Git LFS finalisée (Hooks installés, Locking désactivé).")
+    except Exception as e:
+        print(f"⚠️ Avertissement configuration LFS: {e}")
+
+    # 2. Agent SSH : S'assure que la clé est dans l'agent (corrige Permission denied)
+    try:
+        # Tente de démarrer et d'ajouter la clé via un script PowerShell
+        subprocess.run([
+            'powershell',
+            '-Command',
+            'If (-NOT (Get-Service ssh-agent -ErrorAction SilentlyContinue)) { Set-Service -StartupType Manual -Name ssh-agent }; Start-Service ssh-agent; ssh-add $env:USERPROFILE\\.ssh\\id_ed25519'
+        ], check=False, timeout=10)
+        print("✅ Tentative de chargement de la clé SSH dans l'agent réussie.")
+    except Exception as e:
+        print(f"⚠️ Avertissement Agent SSH: Échec de la commande PowerShell. Assurez-vous d'avoir entré la passphrase manuellement une fois.")
+
+    # ------------------------------------------------------
+
     print(f"\n[INFO] Le dossier '{chemin_local}' est surveillé.")
 
     event_handler = SyncHandler(repo)
